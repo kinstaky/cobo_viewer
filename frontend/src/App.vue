@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import TracePlot from "./TracePlot.vue";
 type Trace = {
   header: Record<string, number | number[] | number[][]>;
   cobo: number;
@@ -37,19 +38,28 @@ const cells = computed(() =>
     ),
   })),
 );
-const points = computed(() => {
-  let path = "";
-  let pen = false;
-  trace.value?.samples.forEach((v, i) => {
-    if (v === null) {
-      pen = false;
-      return;
-    }
-    path += `${pen ? "L" : "M"}${(i / 511) * 1000},${280 - (v / 4095) * 260} `;
-    pen = true;
-  });
-  return path;
-});
+const eventInput = ref<number | string>("");
+const eventError = ref("");
+watch(
+  () => events.value[position.value],
+  (id) => {
+    eventInput.value = id ?? "";
+    eventError.value = "";
+  },
+);
+function applyEvent() {
+  const id = Number(eventInput.value);
+  const index = events.value.indexOf(id);
+  if (eventInput.value === "" || !Number.isInteger(id) || index < 0) {
+    eventError.value = "Event ID not found";
+    return;
+  }
+  eventError.value = "";
+  if (index !== position.value) {
+    position.value = index;
+    void loadEvent();
+  }
+}
 async function get(url: string) {
   const r = await fetch("/api/" + url);
   if (!r.ok) throw Error((await r.json()).detail);
@@ -158,88 +168,110 @@ onUnmounted(() => window.removeEventListener("keydown", key));
           <option disabled value="">Select a run</option>
           <option v-for="r in runs">{{ r }}</option>
         </select></label
-      ><button @click="move(-1)">← Previous event · h</button
-      ><select v-model="position" @change="loadEvent">
-        <option v-for="(e, i) in events" :value="i">Event {{ e }}</option></select
-      ><button @click="move(1)">Next event · l →</button
+      ><label
+        >Event
+        <input
+          v-model="eventInput"
+          type="number"
+          step="1"
+          :disabled="!events.length"
+          :aria-invalid="!!eventError"
+          aria-describedby="event-error"
+          @change="applyEvent"
+          @keydown.enter="applyEvent"
+        /> </label
+      ><span id="event-error" role="alert" v-if="eventError">{{ eventError }}</span
       ><span>{{ busy ? "Reading…" : `${events.length} events` }}</span>
     </section>
     <p role="alert" v-if="error">{{ error }}</p>
-    <section>
-      <div class="heading">
-        <h2>Channel map</h2>
-        <label
-          >CoBo
-          <select v-model="cobo">
-            <option v-for="c in cobos">{{ c }}</option>
-          </select></label
-        ><span>Green: recorded · Purple: FPN · j / k: next / previous trace</span>
-      </div>
-      <div class="scroll">
-        <div class="map">
-          <button
-            v-for="cell in cells"
-            :key="cell.row * 68 + cell.ch"
-            :disabled="cell.index < 0"
-            :title="`AsAd ${Math.floor(cell.row / 4)} AGET ${cell.row % 4} Channel ${cell.ch}`"
-            :aria-label="`AsAd ${Math.floor(cell.row / 4)} AGET ${cell.row % 4} Channel ${cell.ch}`"
-            :class="{
-              hit: cell.index >= 0,
-              fpn: [11, 22, 45, 56].includes(cell.ch),
-              selected: cell.index === selected && cell.index >= 0,
-            }"
-            :style="{
-              marginTop: cell.row % 4 === 0 ? '8px' : '0',
-              marginRight: cell.ch % 8 === 7 ? '3px' : '0',
-            }"
-            @click="selected = cell.index"
-          />
+    <div class="workspace">
+      <aside class="metadata">
+        <div v-if="trace" class="frame-header">
+          <h2>Frame meta</h2>
+          <p>
+            Revision {{ trace.header.revision }} · sizes in 256-byte blocks · hit patterns shown as
+            wire bytes
+          </p>
+          <dl>
+            <dt>Source path</dt>
+            <dd>{{ trace.path }}</dd>
+            <dt>Frame ordinal</dt>
+            <dd>{{ trace.frame }}</dd>
+            <dt>Byte offset</dt>
+            <dd>{{ trace.offset }}</dd>
+            <dt>Timestamp</dt>
+            <dd>{{ trace.timestamp }}</dd>
+            <template v-for="(value, name) in trace.header" :key="name">
+              <dt>{{ String(name).replaceAll("_", " ") }}</dt>
+              <dd v-if="name === 'hit_patterns'">
+                <div v-for="(pattern, aget) in value as number[][]" :key="aget">
+                  AGET {{ aget }}:
+                  {{ pattern.map((byte) => byte.toString(16).padStart(2, "0")).join(" ") }}
+                </div>
+              </dd>
+              <dd v-else-if="name === 'reserved'">
+                <details>
+                  <summary>Reserved bytes</summary>
+                  {{ value }}
+                </details>
+              </dd>
+              <dd v-else>{{ Array.isArray(value) ? value.join(", ") : value }}</dd>
+            </template>
+          </dl>
         </div>
+
+        <p v-if="!trace">Select a run and channel to inspect frame metadata.</p>
+      </aside>
+      <div class="viewer">
+        <section>
+          <div class="heading">
+            <h2>Channel map</h2>
+            <label
+              >CoBo
+              <select v-model="cobo">
+                <option v-for="c in cobos">{{ c }}</option>
+              </select></label
+            ><span>Green: recorded · Purple: FPN · j / k: next / previous trace</span>
+          </div>
+          <div class="scroll">
+            <div class="map">
+              <button
+                v-for="cell in cells"
+                :key="cell.row * 68 + cell.ch"
+                :disabled="cell.index < 0"
+                :title="`AsAd ${Math.floor(cell.row / 4)} AGET ${cell.row % 4} Channel ${cell.ch}`"
+                :aria-label="`AsAd ${Math.floor(cell.row / 4)} AGET ${cell.row % 4} Channel ${cell.ch}`"
+                :class="{
+                  hit: cell.index >= 0,
+                  fpn: [11, 22, 45, 56].includes(cell.ch),
+                  selected: cell.index === selected && cell.index >= 0,
+                }"
+                :style="{
+                  marginTop: cell.row % 4 === 0 ? '8px' : '0',
+                  marginRight: cell.ch % 8 === 7 ? '3px' : '0',
+                }"
+                @click="selected = cell.index"
+              />
+            </div>
+          </div>
+        </section>
+        <section class="waveform">
+          <h2>
+            {{
+              trace
+                ? `CoBo ${trace.cobo} / AsAd ${trace.asad} / AGET ${trace.aget} / Channel ${trace.channel}`
+                : "Select a run to begin"
+            }}
+          </h2>
+          <TracePlot
+            v-if="trace"
+            :samples="trace.samples"
+            :identity="run + ':' + events[position] + ':' + selected"
+          />
+          <p v-else>Select a recorded channel to view its waveform.</p>
+        </section>
       </div>
-    </section>
-    <section>
-      <h2>
-        {{
-          trace
-            ? `CoBo ${trace.cobo} / AsAd ${trace.asad} / AGET ${trace.aget} / Channel ${trace.channel}`
-            : "Select a run to begin"
-        }}
-      </h2>
-      <p>Raw ADC · 0–4095 · sample buckets 0–511</p>
-      <svg viewBox="0 0 1000 300" role="img" aria-label="Raw waveform">
-        <path d="M0 20V280H1000" stroke="#aa9e87" fill="none" />
-        <path :d="points" fill="none" stroke="#205845" stroke-width="2" />
-      </svg>
-      <div v-if="trace" class="frame-header">
-        <h3>Frame header</h3>
-        <p>
-          Revision {{ trace.header.revision }} · sizes in 256-byte blocks · hit patterns shown as
-          wire bytes
-        </p>
-        <dl>
-          <template v-for="(value, name) in trace.header" :key="name">
-            <dt>{{ String(name).replaceAll("_", " ") }}</dt>
-            <dd v-if="name === 'hit_patterns'">
-              <div v-for="(pattern, aget) in value as number[][]" :key="aget">
-                AGET {{ aget }}:
-                {{ pattern.map((byte) => byte.toString(16).padStart(2, "0")).join(" ") }}
-              </div>
-            </dd>
-            <dd v-else-if="name === 'reserved'">
-              <details>
-                <summary>Reserved bytes</summary>
-                {{ value }}
-              </details>
-            </dd>
-            <dd v-else>{{ Array.isArray(value) ? value.join(", ") : value }}</dd>
-          </template>
-        </dl>
-      </div>
-      <details v-if="trace">
-        <summary>Source frame · {{ trace.frame }}</summary>
-        <p>{{ trace.path }} · byte {{ trace.offset }} · timestamp {{ trace.timestamp }}</p>
-      </details>
-    </section>
+    </div>
   </main>
 </template>
 <style>
@@ -252,16 +284,16 @@ body {
     sans-serif;
 }
 main {
-  max-width: 1400px;
+  max-width: 1920px;
   margin: auto;
-  padding: 32px;
+  padding: 16px;
 }
 small {
   color: #205845;
   letter-spacing: 0.15em;
 }
 h1 {
-  font-size: 32px;
+  font-size: 24px;
   margin: 8px 0;
 }
 h2 {
@@ -274,8 +306,8 @@ section {
   background: #fffcf6;
   border: 1px solid #ded5c4;
   border-radius: 14px;
-  padding: 20px;
-  margin-top: 20px;
+  padding: 12px;
+  margin-top: 12px;
 }
 .controls,
 .heading {
@@ -285,6 +317,7 @@ section {
   flex-wrap: wrap;
 }
 button,
+input,
 select {
   padding: 10px;
   border: 1px solid #c6beae;
@@ -296,11 +329,13 @@ button {
   cursor: pointer;
 }
 button:focus-visible,
-select:focus-visible {
+select:focus-visible,
+input:focus-visible {
   outline: 3px solid #b57c25;
 }
 .scroll {
   overflow: auto;
+  padding: 5px;
 }
 .map {
   display: grid;
@@ -327,8 +362,8 @@ select:focus-visible {
 }
 .frame-header dl {
   display: grid;
-  grid-template-columns: minmax(130px, 180px) 1fr;
-  gap: 8px 16px;
+  grid-template-columns: minmax(95px, 110px) minmax(0, 1fr);
+  gap: 6px 10px;
 }
 .frame-header dt {
   text-transform: capitalize;
@@ -338,10 +373,6 @@ select:focus-visible {
   margin: 0;
   overflow-wrap: anywhere;
   font-family: monospace;
-}
-svg {
-  width: 100%;
-  min-height: 180px;
 }
 span {
   font-size: 13px;
@@ -353,6 +384,118 @@ span {
   }
   section {
     padding: 12px;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+header p {
+  margin: 4px 0;
+}
+.controls input {
+  width: 110px;
+}
+.controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#event-error {
+  color: #9c3025;
+}
+.workspace {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+.metadata {
+  background: #fffcf6;
+  border: 1px solid #ded5c4;
+  border-radius: 14px;
+  padding: 12px;
+  overflow: auto;
+}
+.metadata h2,
+.viewer h2 {
+  margin: 0 0 8px;
+}
+.metadata p {
+  font-size: 12px;
+}
+.frame-header dl {
+  font-size: 12px;
+}
+.viewer {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.viewer section {
+  margin: 0;
+  min-width: 0;
+}
+.heading {
+  gap: 10px;
+}
+.heading span {
+  flex: 1;
+}
+.waveform {
+  flex: 1;
+  min-height: 290px;
+  display: flex;
+  flex-direction: column;
+}
+.waveform h2 {
+  font-size: 16px;
+}
+.trace-plot {
+  flex: 1;
+}
+@media (min-width: 1200px) {
+  main {
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+  }
+  .workspace {
+    flex: 1;
+    min-height: 0;
+  }
+  .viewer {
+    min-height: 0;
+  }
+  .waveform {
+    min-height: 0;
+  }
+}
+@media (max-width: 1199px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+  .metadata {
+    order: 2;
+    max-height: 420px;
+  }
+  .waveform {
+    height: 360px;
+    flex: auto;
+  }
+}
+
+@media (min-width: 1200px) {
+  .map {
+    gap: 2px;
+  }
+  .map button {
+    height: 12px;
+  }
+  .waveform .trace-plot {
+    height: 0;
+    min-height: 0;
   }
 }
 </style>
