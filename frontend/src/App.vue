@@ -65,6 +65,35 @@ async function get(url: string) {
   if (!r.ok) throw Error((await r.json()).detail);
   return r.json();
 }
+async function refreshRuns() {
+  const g = ++generation;
+  const currentEvent = events.value[position.value];
+  busy.value = true;
+  error.value = "";
+  try {
+    const availableRuns = await get("runs");
+    if (g !== generation) return;
+    runs.value = availableRuns;
+    if (!run.value || !availableRuns.includes(run.value)) {
+      run.value = "";
+      events.value = [];
+      position.value = 0;
+      traces.value = [];
+      return;
+    }
+    const availableEvents: number[] = await get(`runs/${encodeURIComponent(run.value)}/events`);
+    if (g !== generation) return;
+    events.value = availableEvents;
+    position.value = Math.max(0, availableEvents.indexOf(currentEvent));
+    eventInput.value = availableEvents[position.value] ?? "";
+    eventError.value = "";
+    await loadEvent();
+  } catch (e) {
+    if (g === generation) error.value = String(e);
+  } finally {
+    if (g === generation) busy.value = false;
+  }
+}
 async function loadRun() {
   const g = ++generation;
   busy.value = true;
@@ -146,11 +175,7 @@ function key(e: KeyboardEvent) {
 }
 onMounted(async () => {
   window.addEventListener("keydown", key);
-  try {
-    runs.value = await get("runs");
-  } catch (e) {
-    error.value = String(e);
-  }
+  await refreshRuns();
 });
 onUnmounted(() => window.removeEventListener("keydown", key));
 </script>
@@ -162,6 +187,7 @@ onUnmounted(() => window.removeEventListener("keydown", key));
       <p>Explore acquisition events and their raw waveforms.</p>
     </header>
     <section class="controls">
+      <button :disabled="busy" @click="refreshRuns">Refresh</button>
       <label
         >Run
         <select v-model="run" @change="loadRun">
